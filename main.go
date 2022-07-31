@@ -3,8 +3,8 @@ package main
 
 import (
 	"distribkv/db"
+	"distribkv/web"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 )
@@ -31,28 +31,10 @@ func main() {
 	}
 	defer db.Close()
 
-	http.HandleFunc("/get", func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
-		key := r.Form.Get("key")
+	server := web.NewServer(db)
 
-		value, err := db.GetKey(key)
-		if err != nil {
-			fmt.Fprintf(w, "error = %v", err)
-			return
-		}
-		fmt.Fprintf(w, "value = %q", value)
+	http.HandleFunc("/get", server.GetHandler)
+	http.HandleFunc("/set", server.SetHandler)
 
-	})
-
-	http.HandleFunc("/set", func(w http.ResponseWriter, r *http.Request) {
-		r.ParseForm()
-		key := r.Form.Get("key")
-		value := r.Form.Get("value")
-
-		err := db.SetKey(key, []byte(value))
-
-		fmt.Fprintf(w, "Error = %v", err)
-	})
-
-	log.Fatal(http.ListenAndServe(*httpAddr, nil))
+	log.Fatal(server.ListenAndServe(*httpAddr))
 }
