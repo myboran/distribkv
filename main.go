@@ -4,12 +4,11 @@ package main
 import (
 	"distribkv/config"
 	"distribkv/db"
+	"distribkv/replication"
 	"distribkv/web"
 	"flag"
 	"log"
 	"net/http"
-
-	"github.com/BurntSushi/toml"
 )
 
 var (
@@ -17,6 +16,7 @@ var (
 	httpAddr   = flag.String("http-addr", "127.0.0.1:8080", "HTTP host and port")
 	configFile = flag.String("config-file", "sharding.toml", "Config file for static sharding")
 	shard      = flag.String("shard", "", "The name of the shard for the data")
+	replica    = flag.Bool("replica", false, "Whether or not run as a read-only replica")
 )
 
 func parseFlags() {
@@ -33,35 +33,36 @@ func parseFlags() {
 func main() {
 	parseFlags()
 
-	var c config.Config
-	if _, err := toml.DecodeFile(*configFile, &c); err != nil {
-		log.Fatalf("toml.DecodeFile(%q): %v", *configFile, err)
+	c, err := config.ParseFile(*configFile)
+	if err != nil {
+		log.Fatalf("Error parsing config %q: %v", *configFile, err)
 	}
 
-	var (
-		shardCount int
-		shardIdx   int = -1
-	)
-	shardCount = len(c.Shard)
-	for _, s := range c.Shard {
-		if s.Name == *shard {
-			shardIdx = s.Idx
-		}
-
+	shards, err := config.ParseShards(c.Shards, *shard)
+	if err != nil {
+		log.Fatalf("Error parsing shards config %v", err)
 	}
-	if shardIdx < 0 {
-		log.Fatalf("shard %q was not found.", *shard)
-	}
-	log.Printf("Shard count is %d, current shard: %d", shardCount, shardIdx)
 
-	db, err := db.NewDatabase(*dbLocation)
+	log.Printf("Shard count is %d, current shard: %d", shards.Count, shards.CurIdx)
+
+	dbs, err := db.NewDatabase(*dbLocation)
 	if err != nil {
 		log.Fatalf("NewDatabase (%q) err: %v", *dbLocation, err)
 	}
-	defer db.Close()
+	defer dbs.Close()
 
-	server := web.NewServer(db)
-	http.HandleFunc("/get", server.GetHandler)
-	http.HandleFunc("/set", server.SetHandler)
-	log.Fatal(server.ListenAndServe(*httpAddr))
+	if *replica {
+		leaderAddr, ok := shards.Addrs[shards.CurIdx]
+		if !ok {
+			log.Fatalf("Could not find address for leader for shard %d", shards.CurIdx)
+		}
+		go replication.ClientLoop(dbs, leaderAddr)
+	}
+
+	srv := web.NewServer(dbs, shards)
+	http.HandleFunc("/get", srv.GetHandler)
+	http.HandleFunc("/set", srv.SetHandler)
+	http.HandleFunc("/next-replication-key", srv.GetNextKeyForReplication)
+	http.HandleFunc("/delete-replication-key", srv.DeleteReplicationKey)
+	log.Fatal(srv.ListenAndServe(*httpAddr))
 }
